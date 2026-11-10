@@ -1,0 +1,14 @@
+# Three servers on a shared ReadWriteMany files volume: rolling updates with none down, a budget that keeps one
+# up, the pods spread across nodes.
+publicUrl: https://digin.example.com
+signIn:
+  oidc:
+    issuer: https://id.example.com/realms/work
+    clientId: digin
+    clientSecret: not-a-real-secret
+replicaCount: 3
+persistence:
+  storageClass: nfs
+  accessModes:
+    - ReadWriteMany
+shutdownDelaySeconds: 10

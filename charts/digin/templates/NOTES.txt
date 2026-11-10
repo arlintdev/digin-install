@@ -33,6 +33,16 @@ Uploads are not scanned for malware (clamav.enabled=false); `digin check` says s
 {{- end }}
 {{- if gt (int .Values.replicaCount) 1 }}
 
-WARNING: replicaCount is {{ .Values.replicaCount }}. One replica is the supported shape: live updates go out
-from the process that made the change.
+{{ .Values.replicaCount }} servers share the database and the files volume. Live updates, presence and calls work
+across them; one server holds the calls at a time and hands them over when it stops. Each pod's name is
+its DIGIN_INSTANCE. Which servers hear each other, and which holds the calls:
+     kubectl -n {{ .Release.Namespace }} logs -l app.kubernetes.io/instance={{ .Release.Name }},app.kubernetes.io/component=server -c digin | grep relay
+   and on /metrics: digin_relay_peers, digin_calls_held (1 on one pod).
+Updates roll one pod at a time with none down; a stopping pod drains for {{ .Values.shutdownDelaySeconds }}s first.
+{{- if eq (toString (index .Values.env "DIGIN_CALLS_MEDIA")) "sfu" }}
+
+WARNING: DIGIN_CALLS_MEDIA=sfu with {{ .Values.replicaCount }} replicas. Calls' media go to the pod holding the calls,
+at its own UDP address: every pod needs one browsers reach directly (README, "Several replicas"), or calls
+through the server fail after the calls move.
+{{- end }}
 {{- end }}

@@ -99,6 +99,14 @@ app.kubernetes.io/component: {{ .component }}
 {{- end -}}
 {{- end }}
 
+{{/* Whether the files volume is shared by every replica: ReadWriteMany, or a claim of your own with replicaCount
+above 1, which says it is. "true" or empty. */}}
+{{- define "digin.sharedFiles" -}}
+{{- if and .Values.persistence.enabled (or (has "ReadWriteMany" .Values.persistence.accessModes) (and .Values.persistence.existingClaim (gt (int .Values.replicaCount) 1))) -}}
+true
+{{- end -}}
+{{- end }}
+
 {{/* Checks that stop a render that could not run. */}}
 {{- define "digin.validate" -}}
 {{- $u := urlParse (required "publicUrl is required: the https address people use, such as https://digin.example.com" .Values.publicUrl) -}}
@@ -129,9 +137,16 @@ app.kubernetes.io/component: {{ .component }}
 {{- fail "backup.enabled dumps the bundled PostgreSQL; back up an external database with its own tools" -}}
 {{- end -}}
 {{- if gt (int .Values.replicaCount) 1 -}}
-{{- if not (or .Values.persistence.existingClaim (has "ReadWriteMany" .Values.persistence.accessModes)) -}}
-{{- fail "replicaCount above 1 needs persistence.accessModes to include ReadWriteMany (the uploaded files are shared)" -}}
+{{- if not .Values.persistence.enabled -}}
+{{- fail "replicaCount above 1 needs persistence.enabled: every server reads the files the others keep, on one shared volume" -}}
 {{- end -}}
+{{- if not (include "digin.sharedFiles" .) -}}
+{{- fail "replicaCount above 1 needs persistence.accessModes to include ReadWriteMany, or an existingClaim that is (the uploaded files are shared)" -}}
+{{- end -}}
+{{- end -}}
+{{- $pdb := .Values.podDisruptionBudget -}}
+{{- if and $pdb.enabled (not (kindIs "invalid" $pdb.minAvailable)) (ne (toString $pdb.minAvailable) "") (not (kindIs "invalid" $pdb.maxUnavailable)) (ne (toString $pdb.maxUnavailable) "") -}}
+{{- fail "podDisruptionBudget: set minAvailable or maxUnavailable, not both" -}}
 {{- end -}}
 {{- if and .Values.appTLS.enabled (not .Values.appTLS.secretName) -}}
 {{- fail "appTLS.secretName is required with appTLS.enabled" -}}

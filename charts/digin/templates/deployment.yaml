@@ -2,7 +2,9 @@
 {{- $secret := include "digin.secretName" . }}
 {{- $separate := eq .Values.database.logins "separate" }}
 {{- $tail := include "digin.databaseTail" . }}
-{{- $rwx := or (has "ReadWriteMany" .Values.persistence.accessModes) (and .Values.persistence.existingClaim (gt (int .Values.replicaCount) 1)) }}
+{{- $rwx := include "digin.sharedFiles" . }}
+{{- $several := gt (int .Values.replicaCount) 1 }}
+{{- $delay := int .Values.shutdownDelaySeconds }}
 apiVersion: apps/v1
 kind: Deployment
 metadata:
@@ -14,7 +16,9 @@ spec:
   replicas: {{ .Values.replicaCount }}
   revisionHistoryLimit: 5
   strategy:
-    {{- if and (gt (int .Values.replicaCount) 1) $rwx }}
+    {{- if $rwx }}
+    # The files volume is shared: one new pod at a time, ready before an old one stops, and none down. Its migrate
+    # step runs first, while the old pods serve on (every migration only adds); steps started together take turns.
     type: RollingUpdate
     rollingUpdate:
       maxSurge: 1
@@ -54,7 +58,9 @@ spec:
       {{- end }}
       securityContext:
         {{- toYaml .Values.podSecurityContext | nindent 8 }}
-      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      # The shutdown delay, 20s for the requests under way and 5s more (docs/administration.md, "Stopping without
+      # dropping a request"). No preStop hook: the server waits by itself.
+      terminationGracePeriodSeconds: {{ max (int .Values.terminationGracePeriodSeconds) (add $delay 25) }}
       initContainers:
         # `digin migrate`, signed in as the database's owner: brings the schema to this release and makes or keeps
         # the app's logins, setting their passwords from their files. The app container never holds the owner's password.
@@ -113,6 +119,13 @@ spec:
             - configMapRef:
                 name: {{ $fullname }}
           env:
+            # This server's name among those sharing the database: the pod's, so the log and /metrics say which.
+            - name: DIGIN_INSTANCE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.name
+            - name: DIGIN_SHUTDOWN_DELAY
+              value: {{ printf "%ds" $delay | quote }}
             - name: DIGIN_DATABASE_URL
               value: {{ printf "postgres://%s@%s" (include "digin.serverUser" .) $tail | quote }}
             {{- if $separate }}
@@ -283,7 +296,16 @@ spec:
       tolerations:
         {{- toYaml . | nindent 8 }}
       {{- end }}
-      {{- with .Values.topologySpreadConstraints }}
+      {{- if .Values.topologySpreadConstraints }}
       topologySpreadConstraints:
-        {{- toYaml . | nindent 8 }}
+        {{- toYaml .Values.topologySpreadConstraints | nindent 8 }}
+      {{- else if $several }}
+      # One server a node where the cluster has the nodes, so that a node lost takes one replica with it.
+      topologySpreadConstraints:
+        - maxSkew: 1
+          topologyKey: kubernetes.io/hostname
+          whenUnsatisfiable: ScheduleAnyway
+          labelSelector:
+            matchLabels:
+              {{- include "digin.selectorLabels" (dict "ctx" . "component" "server") | nindent 14 }}
       {{- end }}

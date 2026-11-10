@@ -425,6 +425,11 @@
       "type": "integer",
       "minimum": 0
     },
+    "shutdownDelaySeconds": {
+      "type": "integer",
+      "minimum": 0,
+      "maximum": 60
+    },
     "service": {
       "type": "object",
       "properties": {

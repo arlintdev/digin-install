@@ -65,6 +65,7 @@ Every setting is in [charts/digin/values.yaml](charts/digin/values.yaml). The on
 | `config.profile: fisma-moderate` | Any departure from Digin's secure baseline stops the server |
 | `networkPolicy.ingressFrom` | Who may reach the app (your ingress controller's namespace) |
 | `env`, `secretFiles` | Any other Digin setting, and any other secret, as a file |
+| `replicaCount` + `persistence.accessModes: [ReadWriteMany]` | Several servers behind the Service (below) |
 
 **Your own PostgreSQL.** Make an empty database owned by a role for Digin. If that role is a superuser
 (the default, `database.logins: separate`), Digin's migrate step makes the two logins the app signs in as,
@@ -76,6 +77,32 @@ The app runs as uid 65532 with a read-only root filesystem, no capabilities and 
 profile. Database migrations run in an init container (`digin migrate`, as the database's owner) before
 every start, so the app container never holds the owner's password. ClamAV starts as root and steps down,
 so a namespace with it needs the `baseline` Pod Security level.
+
+**Several replicas.** Set `replicaCount` to 2 or more with a `ReadWriteMany` files volume
+(`persistence.accessModes: [ReadWriteMany]` on a storage class that offers it, such as NFS, EFS, Azure
+Files or CephFS, or an `existingClaim` that is). The servers share the database and the files: live
+updates, presence and calls work across them, and one server holds the calls at a time and hands them over
+when it stops. The chart then:
+
+- rolls updates one pod at a time with none down (`RollingUpdate`, `maxSurge: 1`, `maxUnavailable: 0`;
+  with one `ReadWriteOnce` volume it is `Recreate`);
+- keeps one pod up through node drains (a PodDisruptionBudget, `minAvailable: 1`) and spreads the pods
+  across nodes (`topologySpreadConstraints`, replaceable);
+- names each server after its pod (`DIGIN_INSTANCE`, from the downward API), probes readiness on
+  `/readyz` and liveness on `/healthz`, and gives a stopping pod `shutdownDelaySeconds` (5) to drain,
+  20s for the requests under way and 5s more (`terminationGracePeriodSeconds` is raised to fit);
+- raises the bundled PostgreSQL's `max_connections` to fit (each server opens up to 33; an external
+  database needs as many for each server, and one more server's worth for a rolling update);
+- runs `digin migrate` in every new pod's init container. Steps started together take their turns
+  under a database lock, so the first migrates and the rest find it done; during a rolling update the
+  old pods serve on, since every Digin migration only adds.
+
+Calls' media go browser to browser by default, and need nothing per replica. Through the server
+(`env: {DIGIN_CALLS_MEDIA: sfu}`) every call's media go to the pod holding the calls at a UDP address
+browsers reach directly, never through a load balancer, so each replica needs an address of its own:
+for example `hostNetwork` or a `hostPort` with the node's public address, or a `LoadBalancer` Service per
+pod, with `DIGIN_CALLS_SFU_UDP` and `DIGIN_CALLS_SFU_ADDRESS` set per pod. The chart does not make these
+and leaves it off.
 
 ## Install with Docker Compose
 
@@ -111,11 +138,13 @@ kubectl -n digin exec -i deploy/digin -c digin -- digin license install - < lice
 docker compose exec -T digin digin license install - < license.txt                        # Compose
 ```
 
-`digin license show` says the state and the days left.
+`digin license show` says the state and the days left. With several replicas, a key installed through one is seen by the
+others within half a minute.
 
 ## Upgrade
 
-Back up first. A new release migrates the database before it starts; there is no downgrade.
+Back up first. A new release migrates the database before it starts; there is no downgrade. With
+several replicas the update rolls through them with none down.
 
 ```bash
 helm upgrade digin oci://ghcr.io/arlintdev/charts/digin -n digin -f digin-values.yaml --version X.Y.Z

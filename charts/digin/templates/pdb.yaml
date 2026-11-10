@@ -1,4 +1,7 @@
 {{- if .Values.podDisruptionBudget.enabled }}
+{{- $pdb := .Values.podDisruptionBudget }}
+{{- $min := ternary "" (toString $pdb.minAvailable) (kindIs "invalid" $pdb.minAvailable) }}
+{{- $max := ternary "" (toString $pdb.maxUnavailable) (kindIs "invalid" $pdb.maxUnavailable) }}
 apiVersion: policy/v1
 kind: PodDisruptionBudget
 metadata:
@@ -7,11 +10,16 @@ metadata:
     {{- include "digin.labels" . | nindent 4 }}
     app.kubernetes.io/component: server
 spec:
-  {{- if not (kindIs "invalid" .Values.podDisruptionBudget.minAvailable) }}{{ if ne (toString .Values.podDisruptionBudget.minAvailable) "" }}
-  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
-  {{- end }}{{ end }}
-  {{- if and (or (kindIs "invalid" .Values.podDisruptionBudget.minAvailable) (eq (toString .Values.podDisruptionBudget.minAvailable) "")) (ne (toString .Values.podDisruptionBudget.maxUnavailable) "") }}
-  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- if ne $min "" }}
+  minAvailable: {{ $pdb.minAvailable }}
+  {{- else if ne $max "" }}
+  maxUnavailable: {{ $pdb.maxUnavailable }}
+  {{- else if gt (int .Values.replicaCount) 1 }}
+  # Several servers: a voluntary disruption (a node drain) never takes the last one.
+  minAvailable: 1
+  {{- else }}
+  # One server: a node drain may move it, which a budget of none would block for ever.
+  maxUnavailable: 1
   {{- end }}
   selector:
     matchLabels:

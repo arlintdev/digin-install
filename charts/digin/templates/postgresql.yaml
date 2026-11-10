@@ -88,7 +88,9 @@ spec:
             - -c
             - shared_buffers={{ $pg.sharedBuffers }}
             - -c
-            - max_connections={{ $pg.maxConnections }}
+            {{- /* Each server opens up to 16 connections for people's requests, 16 for its own work and one to listen to
+            the others; with several, the pod a rolling update adds counts too. */}}
+            - max_connections={{ ternary (max (int $pg.maxConnections) (add 10 (mul 35 (add (int .Values.replicaCount) 1)))) $pg.maxConnections (gt (int .Values.replicaCount) 1) }}
             - -c
             - log_connections=on
             - -c

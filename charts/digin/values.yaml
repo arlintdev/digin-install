@@ -112,6 +112,9 @@ database:
 
 # The migrate step: `digin migrate` as the database's owner, in an init container before every start of
 # the app. It brings the schema to the release and makes or keeps the app's logins and their passwords.
+# With several replicas each pod runs it; steps started together take their turns under a database lock
+# (Digin v0.39.0 and later), so the first migrates and the rest find it done. During a rolling update the
+# old pods keep serving on the migrated database: every Digin migration only adds (expand, then contract).
 migrate:
   resources:
     requests:
@@ -129,6 +132,8 @@ postgresql:
     # The same image Digin's compose files run, pinned by digest.
     tag: 17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
     pullPolicy: IfNotPresent
+  # Enough for one server. With replicaCount above 1 it is raised to 35 for each server, and one more for a
+  # rolling update, plus 10.
   maxConnections: 60
   sharedBuffers: 96MB
   persistence:
@@ -164,13 +169,32 @@ persistence:
   existingClaim: ""
   size: 20Gi
   storageClass: ""
-  # One replica takes ReadWriteOnce. More than one needs ReadWriteMany.
+  # One replica takes ReadWriteOnce, and is replaced by stopping it first (Recreate). ReadWriteMany (NFS,
+  # EFS, Azure Files, CephFS...) lets several replicas share the files and updates roll one pod at a time
+  # with none down (RollingUpdate, maxSurge 1, maxUnavailable 0). With existingClaim, the claim must be
+  # ReadWriteMany for replicaCount above 1.
   accessModes:
     - ReadWriteOnce
 
-# One is the supported shape: live updates go out from the process that made the change. More than one
-# needs ReadWriteMany storage (persistence.accessModes).
+# How many servers. Two or more share the database and the files volume: live updates, presence and calls
+# work across them, and a server that stops hands its calls to another (docs/administration.md, "Running
+# two or more servers"). Above 1 needs persistence with ReadWriteMany (or an existingClaim that is), and
+# then gets a PodDisruptionBudget that keeps one up and a spread across nodes unless you set your own.
+# Calls through the server (DIGIN_CALLS_MEDIA=sfu) need one media address per replica (below, at service).
 replicaCount: 1
+
+# How long a pod told to stop goes on serving while it answers /readyz with 503, so that the Service and
+# the ingress stop sending to it first (DIGIN_SHUTDOWN_DELAY, 0 to 60). It then hands over its calls,
+# closes its live streams (the tabs reconnect to another pod) and gives the requests under way 20s.
+# Keep it longer than the readiness probe takes to notice (probes.readiness).
+shutdownDelaySeconds: 5
+
+# Calls' media go browser to browser by default (DIGIN_CALLS_MEDIA=mesh), through TURN when they must,
+# and need nothing per replica. Through the server (DIGIN_CALLS_MEDIA=sfu, set in env) every call's media
+# go to the replica holding the calls, at a UDP address browsers reach directly, never through a load
+# balancer: with more than one replica each needs its own (DIGIN_CALLS_SFU_UDP and DIGIN_CALLS_SFU_ADDRESS),
+# for example hostNetwork or a hostPort with the node's address, or a LoadBalancer Service per pod. The
+# chart does not make these; it is off by default, and the README says how. See docs/configuration.md.
 
 service:
   type: ClusterIP
@@ -210,6 +234,8 @@ priorityClassName: ""
 nodeSelector: {}
 tolerations: []
 affinity: {}
+# Empty with replicaCount above 1: the pods are spread across nodes (kubernetes.io/hostname, maxSkew 1,
+# ScheduleAnyway). Set your own to replace it, such as across zones.
 topologySpreadConstraints: []
 
 # The image's own hardening, kept: uid 65532, nothing written but the data volume, no capability.
@@ -253,17 +279,21 @@ probes:
     periodSeconds: 30
     failureThreshold: 3
     timeoutSeconds: 5
+  # A stopping pod says not ready at once: noticed within periodSeconds x failureThreshold, inside
+  # shutdownDelaySeconds.
   readiness:
-    periodSeconds: 10
-    failureThreshold: 3
-    timeoutSeconds: 5
+    periodSeconds: 2
+    failureThreshold: 2
+    timeoutSeconds: 2
 
+# Raised to shutdownDelaySeconds + 25 (the delay, 20s for the requests under way and 5s more) when lower.
 terminationGracePeriodSeconds: 30
 
 podDisruptionBudget:
   enabled: true
-  # One of the two. With one replica, maxUnavailable 1 lets a node drain go ahead.
-  maxUnavailable: 1
+  # At most one of the two. Both empty: maxUnavailable 1 with one replica (a node drain goes ahead), and
+  # minAvailable 1 with more (one always stays up).
+  maxUnavailable: ""
   minAvailable: ""
 
 networkPolicy:
