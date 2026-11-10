@@ -1,0 +1,28 @@
+# Your own PostgreSQL, reached at verify-full, whose owner is not a superuser; Google sign-in; TLS on the app.
+publicUrl: https://work.example.com
+signIn:
+  google:
+    clientId: 1234-abc.apps.googleusercontent.com
+    clientSecret: not-a-real-secret
+  signup: invite
+postgresql:
+  enabled: false
+externalDatabase:
+  host: pg.db.example.internal
+  port: 5432
+  sslMode: verify-full
+  caSecret:
+    name: db-ca
+database:
+  logins: owner
+  requireTLS: true
+appTLS:
+  enabled: true
+  secretName: digin-app-tls
+persistence:
+  storageClass: fast
+  size: 50Gi
+secrets:
+  dbOwnerPassword: not-a-real-password
+podDisruptionBudget:
+  minAvailable: 0

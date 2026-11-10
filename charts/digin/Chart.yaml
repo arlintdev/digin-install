@@ -1,0 +1,26 @@
+apiVersion: v2
+name: digin
+description: >-
+  Digin, a self-hosted work app (issues, pages, chat, calls) for government boundaries.
+  Proprietary: free to evaluate for 90 days, then a license key from arlint.dev is required.
+type: application
+# The chart's own version, moved with every change to the chart.
+version: 0.39.0
+# The Digin release the chart installs by default: the image tag is this, or this with -fips.
+appVersion: "v0.39.0"
+kubeVersion: ">=1.27.0-0"
+home: https://about.digin.work
+sources:
+  - https://github.com/arlintdev/digin-install
+keywords:
+  - digin
+  - issues
+  - wiki
+  - chat
+  - fisma
+  - il4
+maintainers:
+  - name: arlint.dev
+    email: sales@digin.work
+annotations:
+  licenses: Proprietary (90-day evaluation; see LICENSE)

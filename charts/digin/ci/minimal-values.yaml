@@ -1,0 +1,7 @@
+# The least an install needs: an address and a sign-in provider. Bundled PostgreSQL, generated secrets.
+publicUrl: https://digin.example.com
+signIn:
+  oidc:
+    issuer: https://id.example.com/realms/work
+    clientId: digin
+    clientSecret: not-a-real-secret

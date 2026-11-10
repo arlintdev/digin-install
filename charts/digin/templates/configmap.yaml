@@ -1,0 +1,48 @@
+{{- /* The settings that are not secrets, as Digin's environment. Empty values are left out: Digin's default. */}}
+{{- $s := dict
+  "DIGIN_PUBLIC_URL" .Values.publicUrl
+  "TZ" .Values.timezone
+  "OIDC_ISSUER" .Values.signIn.oidc.issuer
+  "OIDC_CLIENT_ID" .Values.signIn.oidc.clientId
+  "OIDC_NAME" .Values.signIn.oidc.name
+  "CF_TEAM_DOMAIN" .Values.signIn.oidc.cloudflareTeamDomain
+  "GOOGLE_CLIENT_ID" .Values.signIn.google.clientId
+  "DIGIN_SIGNUP" .Values.signIn.signup
+  "DIGIN_ADMIN_GROUP" .Values.signIn.adminGroup
+  "DIGIN_AUDITOR_GROUP" .Values.signIn.auditorGroup
+  "DIGIN_GROUPS_CLAIM" .Values.signIn.groupsClaim
+  "DIGIN_PROFILE" .Values.config.profile
+  "DIGIN_TRUSTED_PROXIES" .Values.config.trustedProxies
+  "DIGIN_ALLOWED_HOSTS" .Values.config.allowedHosts
+  "DIGIN_ICE_SERVERS" .Values.config.iceServers
+  "DIGIN_BOTS_ALLOWED_HOSTS" .Values.config.botsAllowedHosts
+  "DIGIN_SESSION_MAX" .Values.config.sessionMax
+  "DIGIN_SESSION_IDLE" .Values.config.sessionIdle
+  "DIGIN_CONTACT_EMAIL" .Values.config.contactEmail
+  "LOG_LEVEL" .Values.config.logLevel
+}}
+{{- if .Values.config.maxUploadMB }}{{ $_ := set $s "DIGIN_MAX_UPLOAD_MB" (toString .Values.config.maxUploadMB) }}{{ end }}
+{{- if .Values.signIn.requireVerifiedEmail }}{{ $_ := set $s "DIGIN_REQUIRE_VERIFIED_EMAIL" "1" }}{{ end }}
+{{- if .Values.database.requireTLS }}{{ $_ := set $s "DIGIN_DATABASE_REQUIRE_TLS" "1" }}{{ end }}
+{{- if .Values.image.fips }}{{ $_ := set $s "DIGIN_FIPS" "require" }}{{ end }}
+{{- if .Values.clamav.enabled }}
+{{- $_ := set $s "DIGIN_SCAN" (printf "clamd://%s:3310" (include "digin.clamavName" .)) }}
+{{- $_ := set $s "DIGIN_SCAN_MAX_MB" (toString .Values.config.maxUploadMB) }}
+{{- end }}
+{{- if .Values.appTLS.enabled }}
+{{- $_ := set $s "DIGIN_TLS_CERT" "/run/tls/app/tls.crt" }}
+{{- $_ := set $s "DIGIN_TLS_KEY" "/run/tls/app/tls.key" }}
+{{- end }}
+{{- range $k, $v := .Values.env }}{{ $_ := set $s $k (toString $v) }}{{ end }}
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "digin.fullname" . }}
+  labels:
+    {{- include "digin.labels" . | nindent 4 }}
+data:
+  {{- range $k, $v := $s }}
+  {{- if $v }}
+  {{ $k }}: {{ $v | quote }}
+  {{- end }}
+  {{- end }}

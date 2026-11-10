@@ -1,0 +1,237 @@
+# Digin on one host with Docker Compose: the app, its migrate step, PostgreSQL 17 and (optionally) ClamAV.
+# Derived from Digin's hardened compose file: every secret is a file, the app signs in to the database as a
+# login of its own that owns nothing, the database is on an internal network with no published port, and
+# the containers run read-only with no capabilities.
+#
+#   cp .env.example .env            # then fill it in
+#   sudo ./make-secrets.sh          # the secret files, in ./secrets
+#   docker compose up -d            # add --profile scan for ClamAV
+#
+# Digin is proprietary: free to evaluate for 90 days from first start, not in production (LICENSE).
+
+name: digin
+
+services:
+  digin:
+    image: &digin-image ghcr.io/arlintdev/digin:${DIGIN_RELEASE:-v0.39.0}
+    container_name: digin
+    restart: unless-stopped
+    # The settings that are not secrets. No secret goes in .env. (Without one, DIGIN_PUBLIC_URL below stops `up`.)
+    env_file:
+      - path: .env
+        required: false
+    secrets:
+      - db_server_password
+      - db_system_password
+      - files_key
+      - oidc_client_secret
+    environment:
+      DIGIN_PUBLIC_URL: ${DIGIN_PUBLIC_URL:?set DIGIN_PUBLIC_URL in .env}
+      # The database below, on this project's internal network. The app signs in as digin_server, which owns
+      # nothing and is no superuser; its own work as digin_server_system. The migrate service makes both.
+      DIGIN_DATABASE_URL: postgres://${DIGIN_DB_SERVER_USER:-digin_server}@db:5432/${DIGIN_DB_NAME:-digin}?sslmode=disable
+      DIGIN_DATABASE_PASSWORD_FILE: /run/secrets/db_server_password
+      DIGIN_DATABASE_SYSTEM_USER: ${DIGIN_DB_SYSTEM_USER:-digin_server_system}
+      DIGIN_DATABASE_SYSTEM_PASSWORD_FILE: /run/secrets/db_system_password
+      # Uploaded files are sealed with this key. Keep a copy off the server: without it the files are gone.
+      DIGIN_FILES_KEY_FILE: /run/secrets/files_key
+      TZ: ${TZ:-UTC}
+    volumes:
+      - digin-data:/app/data
+    # Plain HTTP on 3000, for a reverse proxy on this host that ends TLS (DIGIN_PUBLIC_URL must be https).
+    ports:
+      - "${DIGIN_BIND:-127.0.0.1:3000}:3000"
+    depends_on:
+      db:
+        condition: service_healthy
+      # Not before the migrate service has brought the database to this release and made the app's logins.
+      migrate:
+        condition: service_completed_successfully
+      # With --profile scan, not before the scanner answers.
+      clamav:
+        condition: service_healthy
+        required: false
+    networks:
+      - backend
+      - frontend
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 512m
+    # Every live stream is an open socket.
+    ulimits:
+      nofile:
+        soft: 65536
+        hard: 65536
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  # The database's owner at work, before the app starts and only then: `digin migrate` brings the schema to
+  # this release, makes digin_app and digin_system, and makes the app's two logins or keeps them as they should
+  # be, setting their passwords from their files. On every `up`, which is how an upgrade is migrated.
+  migrate:
+    image: *digin-image
+    command: ["migrate"]
+    restart: "no"
+    secrets:
+      - db_password
+      - db_server_password
+      - db_system_password
+    environment:
+      DIGIN_DATABASE_URL: postgres://${DIGIN_DB_USER:-digin}@db:5432/${DIGIN_DB_NAME:-digin}?sslmode=disable
+      DIGIN_DATABASE_PASSWORD_FILE: /run/secrets/db_password
+      DIGIN_DB_SERVER_USER: ${DIGIN_DB_SERVER_USER:-digin_server}
+      DIGIN_DB_SERVER_PASSWORD_FILE: /run/secrets/db_server_password
+      DIGIN_DB_SYSTEM_USER: ${DIGIN_DB_SYSTEM_USER:-digin_server_system}
+      DIGIN_DB_SYSTEM_PASSWORD_FILE: /run/secrets/db_system_password
+      DIGIN_FIPS: ${DIGIN_FIPS:-}
+      DIGIN_SECRET_FILE_CHECK: ${DIGIN_SECRET_FILE_CHECK:-}
+      TZ: UTC
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - backend
+    read_only: true
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 64
+    mem_limit: 256m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  # PostgreSQL 17, on the internal network only: no published port, SCRAM never MD5, connections logged.
+  db:
+    image: postgres:17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    container_name: digin-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${DIGIN_DB_USER:-digin}
+      POSTGRES_DB: ${DIGIN_DB_NAME:-digin}
+      # Read at first start only, to make the owner; the migrate service reads the same file, the app never does.
+      POSTGRES_PASSWORD_FILE: /run/secrets/db_password
+      POSTGRES_INITDB_ARGS: --locale=C --encoding=UTF8 --auth-host=scram-sha-256
+      TZ: UTC
+    command: ["postgres", "-c", "password_encryption=scram-sha-256", "-c", "shared_buffers=96MB", "-c", "max_connections=40",
+      "-c", "log_connections=on", "-c", "log_disconnections=on", "-c", "wal_level=replica"]
+    secrets:
+      - db_password
+    volumes:
+      - digin-pgdata:/var/lib/postgresql/data
+    networks:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $$POSTGRES_USER -d $$POSTGRES_DB -q"]
+      interval: 10s
+      timeout: 5s
+      retries: 6
+      start_period: 20s
+    # Only what the image's start-up needs to take its data directory and step down from root.
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    shm_size: 128m
+    mem_limit: 512m
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+  # ClamAV, which every upload is shown before it is kept. Started with `--profile scan`, and named to the app
+  # with DIGIN_SCAN=clamd://clamav:3310 in .env. It wants about 1 GB of memory, 2 GB while it reloads.
+  clamav:
+    profiles: ["scan"]
+    image: ${DIGIN_CLAMAV_IMAGE:-clamav/clamav:stable@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0}
+    container_name: digin-clamav
+    restart: unless-stopped
+    # Starts freshclam and clamd itself, retries a clamd that refused to start, and stops the container if clamd
+    # stops after it has answered, for Docker to start it again.
+    entrypoint: ["/sbin/tini", "--", "/bin/sh", "/usr/local/bin/digin-clamav-start"]
+    environment:
+      # A signature mirror inside your boundary, as host:port (no http://). Without it, ClamAV's own servers.
+      # FRESHCLAM_CONF_PrivateMirror: clamav-mirror.example.gov:8080
+      FRESHCLAM_CHECKS: "24"
+      # Each database only with its SHA-256 .cvd.sign file (ClamAV's own check).
+      FRESHCLAM_CONF_FIPSCryptoHashLimits: "yes"
+      CLAMD_CONF_FIPSCryptoHashLimits: "yes"
+      CLAMD_STARTUP_TIMEOUT: "${DIGIN_CLAMAV_STARTUP_TIMEOUT:-300}"
+    volumes:
+      - digin-clamav:/var/lib/clamav
+      - type: bind
+        source: ./clamav/digin-clamav-start
+        target: /usr/local/bin/digin-clamav-start
+        read_only: true
+        bind:
+          create_host_path: false
+    # The app reaches it on the internal network; the other one is for fetching signatures.
+    networks:
+      - backend
+      - frontend
+    healthcheck:
+      test: ["CMD", "clamdscan", "--ping", "1"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: "${DIGIN_CLAMAV_STARTUP_TIMEOUT:-300}s"
+    cap_drop:
+      - ALL
+    cap_add:
+      - CHOWN
+      - DAC_OVERRIDE
+      - FOWNER
+      - SETGID
+      - SETUID
+    security_opt:
+      - no-new-privileges:true
+    pids_limit: 256
+    mem_limit: 3g
+    logging:
+      driver: json-file
+      options:
+        max-size: 10m
+        max-file: "3"
+
+volumes:
+  digin-data:
+  digin-pgdata:
+  digin-clamav:
+
+# Each a file in ./secrets, made by make-secrets.sh: owned by 65532 (the app's user) and mode 0400.
+secrets:
+  db_password:
+    file: ./secrets/db_password
+  db_server_password:
+    file: ./secrets/db_server_password
+  db_system_password:
+    file: ./secrets/db_system_password
+  files_key:
+    file: ./secrets/files_key
+  oidc_client_secret:
+    file: ./secrets/oidc_client_secret
+
+networks:
+  # The app, its database, the migrate step and the scanner. No way out.
+  backend:
+    internal: true
+  # The app's published port and its way out to the sign-in provider; the scanner's to its signatures.
+  frontend: {}

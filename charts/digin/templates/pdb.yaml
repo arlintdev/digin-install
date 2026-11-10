@@ -1,0 +1,19 @@
+{{- if .Values.podDisruptionBudget.enabled }}
+apiVersion: policy/v1
+kind: PodDisruptionBudget
+metadata:
+  name: {{ include "digin.fullname" . }}
+  labels:
+    {{- include "digin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  {{- if not (kindIs "invalid" .Values.podDisruptionBudget.minAvailable) }}{{ if ne (toString .Values.podDisruptionBudget.minAvailable) "" }}
+  minAvailable: {{ .Values.podDisruptionBudget.minAvailable }}
+  {{- end }}{{ end }}
+  {{- if and (or (kindIs "invalid" .Values.podDisruptionBudget.minAvailable) (eq (toString .Values.podDisruptionBudget.minAvailable) "")) (ne (toString .Values.podDisruptionBudget.maxUnavailable) "") }}
+  maxUnavailable: {{ .Values.podDisruptionBudget.maxUnavailable }}
+  {{- end }}
+  selector:
+    matchLabels:
+      {{- include "digin.selectorLabels" (dict "ctx" . "component" "server") | nindent 6 }}
+{{- end }}

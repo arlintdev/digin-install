@@ -1,0 +1,38 @@
+{{- $fullname := include "digin.fullname" . -}}
+Digin {{ .Chart.AppVersion }}{{ if .Values.image.fips }} (FIPS){{ end }} is installing as {{ $fullname }} in {{ .Release.Namespace }}.
+
+EVALUATION: Digin is proprietary software. You may evaluate it for 90 days from its first
+start, not in production. After 90 days it becomes read-only until an administrator enters a
+license key. Buy one: sales@digin.work. Terms: https://github.com/arlintdev/digin-install/blob/main/LICENSE
+
+1. Wait for it:
+     kubectl -n {{ .Release.Namespace }} rollout status deploy/{{ $fullname }}
+
+2. Open {{ .Values.publicUrl }}
+{{- if not .Values.ingress.enabled }}
+   No Ingress was made: route that https address to the service {{ $fullname }}:{{ .Values.service.port }}.
+{{- end }}
+   Your sign-in provider must allow the redirect URL {{ .Values.publicUrl }}/auth/callback
+
+3. Make the first administrator. Sign in once, then:
+     kubectl -n {{ .Release.Namespace }} exec deploy/{{ $fullname }} -c digin -- digin org admin you@example.com
+
+4. Enter a license key (Organisation > License in the app, or):
+     kubectl -n {{ .Release.Namespace }} exec -i deploy/{{ $fullname }} -c digin -- digin license install - < license.txt
+
+Check the deployment against Digin's secure baseline:
+     kubectl -n {{ .Release.Namespace }} exec deploy/{{ $fullname }} -c digin -- digin check
+{{- if not .Values.secrets.existingSecret }}
+
+Back up the files key now: without it the uploaded files cannot be read.
+     kubectl -n {{ .Release.Namespace }} get secret {{ include "digin.secretName" . }} -o jsonpath='{.data.files-key}' | base64 -d
+{{- end }}
+{{- if not .Values.clamav.enabled }}
+
+Uploads are not scanned for malware (clamav.enabled=false); `digin check` says so.
+{{- end }}
+{{- if gt (int .Values.replicaCount) 1 }}
+
+WARNING: replicaCount is {{ .Values.replicaCount }}. One replica is the supported shape: live updates go out
+from the process that made the change.
+{{- end }}

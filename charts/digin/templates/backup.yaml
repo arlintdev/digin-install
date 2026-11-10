@@ -1,0 +1,116 @@
+{{- if .Values.backup.enabled }}
+{{- $name := printf "%s-backup" (include "digin.fullname" .) }}
+{{- $b := .Values.backup }}
+{{- if not $b.persistence.existingClaim }}
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "digin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+  annotations:
+    helm.sh/resource-policy: keep
+spec:
+  accessModes:
+    - ReadWriteOnce
+  {{- with $b.persistence.storageClass }}
+  storageClassName: {{ . | quote }}
+  {{- end }}
+  resources:
+    requests:
+      storage: {{ $b.persistence.size }}
+---
+{{- end }}
+# Each night, pg_dump of Digin's database (custom format) as its owner, into the backup volume, and
+# dumps older than retainDays removed. Unsealed: copy them somewhere safe and encrypted. The uploaded files
+# are not in it (README, Back up).
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: {{ $name }}
+  labels:
+    {{- include "digin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  schedule: {{ $b.schedule | quote }}
+  concurrencyPolicy: Forbid
+  successfulJobsHistoryLimit: 3
+  failedJobsHistoryLimit: 3
+  jobTemplate:
+    spec:
+      backoffLimit: 2
+      template:
+        metadata:
+          labels:
+            {{- include "digin.labels" . | nindent 12 }}
+            app.kubernetes.io/component: backup
+        spec:
+          restartPolicy: Never
+          serviceAccountName: {{ include "digin.serviceAccountName" . }}
+          automountServiceAccountToken: false
+          enableServiceLinks: false
+          securityContext:
+            runAsNonRoot: true
+            runAsUser: 70
+            runAsGroup: 70
+            fsGroup: 70
+            seccompProfile:
+              type: RuntimeDefault
+          containers:
+            - name: pg-dump
+              image: {{ printf "%s:%s" .Values.postgresql.image.repository .Values.postgresql.image.tag }}
+              imagePullPolicy: {{ .Values.postgresql.image.pullPolicy }}
+              command:
+                - sh
+                - -c
+                - |
+                  set -eu
+                  name="digin-$(date -u +%F-%H%M%S).dump"
+                  umask 077
+                  PGPASSWORD="$(cat /run/secrets/db-owner-password)" pg_dump -h "$PGHOST" -U "$PGUSER" -d "$PGDATABASE" -Fc -f "/backups/$name.part"
+                  mv "/backups/$name.part" "/backups/$name"
+                  pg_restore --list "/backups/$name" >/dev/null
+                  echo "$name"
+                  find /backups -maxdepth 1 -name 'digin-*.dump' -mtime +"$RETAIN_DAYS" -print -delete
+              env:
+                - name: PGHOST
+                  value: {{ include "digin.postgresqlName" . }}
+                - name: PGUSER
+                  value: {{ .Values.database.ownerUser | quote }}
+                - name: PGDATABASE
+                  value: {{ .Values.database.name | quote }}
+                - name: RETAIN_DAYS
+                  value: {{ $b.retainDays | quote }}
+              securityContext:
+                runAsNonRoot: true
+                runAsUser: 70
+                runAsGroup: 70
+                readOnlyRootFilesystem: true
+                allowPrivilegeEscalation: false
+                privileged: false
+                capabilities:
+                  drop:
+                    - ALL
+                seccompProfile:
+                  type: RuntimeDefault
+              resources:
+                {{- toYaml $b.resources | nindent 16 }}
+              volumeMounts:
+                - name: backups
+                  mountPath: /backups
+                - name: owner-password
+                  mountPath: /run/secrets
+                  readOnly: true
+          volumes:
+            - name: backups
+              persistentVolumeClaim:
+                claimName: {{ default $name $b.persistence.existingClaim }}
+            - name: owner-password
+              secret:
+                secretName: {{ include "digin.secretName" . }}
+                defaultMode: 0440
+                items:
+                  - key: db-owner-password
+                    path: db-owner-password
+{{- end }}

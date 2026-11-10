@@ -1,0 +1,4 @@
+dist/
+compose/.env
+compose/secrets/
+.DS_Store

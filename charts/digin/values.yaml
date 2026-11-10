@@ -1,0 +1,331 @@
+# Digin's Helm chart. The settings below map to Digin's documented environment settings; anything not
+# named here goes in `env` (plain values) or `secretFiles` (secrets, read from files).
+# Digin is proprietary: free to evaluate for 90 days from first start, then a license key is required.
+
+image:
+  repository: ghcr.io/arlintdev/digin
+  # Empty: the chart's appVersion (vX.Y.Z). With fips, "-fips" is added.
+  tag: ""
+  # Pin by digest (sha256:...) to run exactly the image you verified. Wins over tag.
+  digest: ""
+  # The FIPS image (vX.Y.Z-fips): the validated Go Cryptographic Module in FIPS 140-3 mode. Also sets
+  # DIGIN_FIPS=require, so the server refuses to start outside FIPS mode.
+  fips: false
+  pullPolicy: IfNotPresent
+
+imagePullSecrets: []
+nameOverride: ""
+fullnameOverride: ""
+
+# Required. The https address people use, such as https://digin.example.com (DIGIN_PUBLIC_URL).
+# Sign-in redirects to <publicUrl>/auth/callback.
+publicUrl: ""
+
+# The boundary's time zone: what "today" and "overdue" mean (TZ).
+timezone: UTC
+
+# Sign-in: at least one of OIDC (any provider, or Cloudflare Access) or Google.
+signIn:
+  oidc:
+    issuer: ""                 # OIDC_ISSUER
+    clientId: ""               # OIDC_CLIENT_ID
+    # OIDC_CLIENT_SECRET, kept in the chart's Secret. Ignored with secrets.existingSecret (key oidc-client-secret).
+    clientSecret: ""
+    name: ""                   # OIDC_NAME, the button's label; "Single sign-on" unset
+    cloudflareTeamDomain: ""   # CF_TEAM_DOMAIN: with Cloudflare Access as the provider, the issuer is worked out
+  google:
+    clientId: ""               # GOOGLE_CLIENT_ID
+    clientSecret: ""           # GOOGLE_CLIENT_SECRET (key google-client-secret with an existing secret)
+  # open (anyone Google or Apple vouches for gets an account) or invite. Unset: open.
+  signup: ""                   # DIGIN_SIGNUP
+  requireVerifiedEmail: false  # DIGIN_REQUIRE_VERIFIED_EMAIL
+  adminGroup: ""               # DIGIN_ADMIN_GROUP
+  auditorGroup: ""             # DIGIN_AUDITOR_GROUP
+  groupsClaim: ""              # DIGIN_GROUPS_CLAIM
+
+# Common settings. Empty means Digin's own default (docs: every setting, its default and its control).
+config:
+  # "" or fisma-moderate: under fisma-moderate any departure from the secure baseline stops the server.
+  # `kubectl exec deploy/<release>-digin -- digin check` lists what it would refuse.
+  profile: ""                  # DIGIN_PROFILE
+  # The proxies whose X-Forwarded-For is believed: addresses or CIDRs (your ingress controller's pod
+  # range), or none. Unset: any private address.
+  trustedProxies: ""           # DIGIN_TRUSTED_PROXIES
+  # Extra Host names to answer to, besides publicUrl's host, the service name and localhost.
+  allowedHosts: ""             # DIGIN_ALLOWED_HOSTS
+  maxUploadMB: 25              # DIGIN_MAX_UPLOAD_MB
+  # Calls: a JSON list of STUN/TURN servers, or [] for none. Unset: Cloudflare's public STUN server.
+  iceServers: ""               # DIGIN_ICE_SERVERS
+  # Where bots may send (model servers), as host names, or none. Unset: any public host.
+  botsAllowedHosts: ""         # DIGIN_BOTS_ALLOWED_HOSTS
+  sessionMax: ""               # DIGIN_SESSION_MAX, e.g. 12h
+  sessionIdle: ""              # DIGIN_SESSION_IDLE, e.g. 30m
+  contactEmail: ""             # DIGIN_CONTACT_EMAIL
+  logLevel: info               # LOG_LEVEL
+
+# Any other documented setting, as NAME: value. Not for secrets: use secretFiles.
+env: {}
+#  DIGIN_ACCOUNT_IDLE_DAYS: "90"
+#  DIGIN_FEEDS_ALLOWED_HOSTS: none
+
+# Secrets beyond the built-in ones, each mounted from the chart's (or your existing) Secret as a file
+# and named in its NAME_FILE setting, as Digin's baseline asks (no secret in the environment).
+secretFiles: []
+#  - env: RESEND_API_KEY_FILE
+#    key: resend-api-key
+#    value: ""        # chart-managed only; with secrets.existingSecret, put the key in that Secret
+
+secrets:
+  # The name of a Secret you made yourself, instead of the chart's. Keys it must hold:
+  #   files-key            32 random bytes, base64 (openssl rand -base64 32). Keep a copy: without it the
+  #                        uploaded files cannot be read.
+  #   db-owner-password    the database owner's password (bundled PostgreSQL: set at its first start)
+  #   db-server-password   the app's login (digin_server), made by the migrate step
+  #   db-system-password   the app's own work's login (digin_server_system), made by the migrate step
+  #   oidc-client-secret   with signIn.oidc
+  #   google-client-secret with signIn.google
+  # and any key named in secretFiles.
+  existingSecret: ""
+  # For the chart's own Secret: left empty, the files key and the passwords are generated once and kept
+  # across upgrades (and kept after `helm uninstall`; delete the Secret yourself).
+  filesKey: ""
+  dbOwnerPassword: ""
+  dbServerPassword: ""
+  dbSystemPassword: ""
+
+# How the app signs in to PostgreSQL.
+database:
+  name: digin
+  # The database's owner, which the migrate step signs in as.
+  ownerUser: digin
+  # separate: the app signs in as two logins of its own (serverUser, systemUser) that own nothing and are
+  #   not superusers; the migrate step makes them, which needs the owner to be a superuser (the bundled
+  #   PostgreSQL's owner is). Digin's secure baseline.
+  # owner: the app signs in as the owner itself, for a database whose owner is not a superuser (a managed
+  #   PostgreSQL a platform team hands over). The workspace boundary still holds; search reads rows
+  #   rather than its full-text indexes.
+  logins: separate
+  serverUser: digin_server
+  systemUser: digin_server_system
+  # Refuse to start unless the link is verify-full TLS (DIGIN_DATABASE_REQUIRE_TLS).
+  requireTLS: false
+
+# The migrate step: `digin migrate` as the database's owner, in an init container before every start of
+# the app. It brings the schema to the release and makes or keeps the app's logins and their passwords.
+migrate:
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 256Mi
+
+# A PostgreSQL 17 for Digin alone, run by this chart (no third-party chart). Turn it off and fill in
+# externalDatabase to use your own.
+postgresql:
+  enabled: true
+  image:
+    repository: postgres
+    # The same image Digin's compose files run, pinned by digest.
+    tag: 17-alpine@sha256:b0f9560a2de083e2cc7382e75f808c7381a32852a7ec49117deedb300e552b24
+    pullPolicy: IfNotPresent
+  maxConnections: 60
+  sharedBuffers: 96MB
+  persistence:
+    size: 10Gi
+    storageClass: ""
+    accessModes:
+      - ReadWriteOnce
+  resources:
+    requests:
+      cpu: 100m
+      memory: 256Mi
+    limits:
+      memory: 1Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# Your own PostgreSQL (13 or later), used when postgresql.enabled is false. Make an empty database owned
+# by database.ownerUser first (see README).
+externalDatabase:
+  host: ""
+  port: 5432
+  # verify-full checks the server's certificate and name. disable only for a database on the same node.
+  sslMode: verify-full
+  # The authority that signed the database's certificate: a Secret holding it, mounted at /run/tls/db-ca.pem.
+  caSecret:
+    name: ""
+    key: ca.crt
+
+# Where uploaded files are kept, sealed with the files key (DIGIN_DATA_DIR, /app/data).
+persistence:
+  enabled: true
+  existingClaim: ""
+  size: 20Gi
+  storageClass: ""
+  # One replica takes ReadWriteOnce. More than one needs ReadWriteMany.
+  accessModes:
+    - ReadWriteOnce
+
+# One is the supported shape: live updates go out from the process that made the change. More than one
+# needs ReadWriteMany storage (persistence.accessModes).
+replicaCount: 1
+
+service:
+  type: ClusterIP
+  port: 3000
+  annotations: {}
+
+ingress:
+  enabled: false
+  className: ""
+  # The host is publicUrl's unless set here.
+  host: ""
+  annotations: {}
+    # Digin streams events on GET /api/v1/live: the proxy must not buffer it, and must take uploads of
+    # config.maxUploadMB. For ingress-nginx:
+    # nginx.ingress.kubernetes.io/proxy-buffering: "off"
+    # nginx.ingress.kubernetes.io/proxy-read-timeout: "3600"
+    # nginx.ingress.kubernetes.io/proxy-body-size: 25m
+  tls:
+    enabled: true
+    # The certificate's Secret (tls.crt, tls.key); made by cert-manager or by you.
+    secretName: ""
+
+# TLS on the app itself (DIGIN_TLS_CERT, DIGIN_TLS_KEY), for when the proxy is elsewhere or policy says
+# every hop is encrypted: a kubernetes.io/tls Secret. The service and the probes then speak https.
+appTLS:
+  enabled: false
+  secretName: ""
+
+serviceAccount:
+  create: true
+  name: ""
+  annotations: {}
+
+podAnnotations: {}
+podLabels: {}
+priorityClassName: ""
+nodeSelector: {}
+tolerations: []
+affinity: {}
+topologySpreadConstraints: []
+
+# The image's own hardening, kept: uid 65532, nothing written but the data volume, no capability.
+podSecurityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  fsGroup: 65532
+  fsGroupChangePolicy: OnRootMismatch
+  seccompProfile:
+    type: RuntimeDefault
+
+securityContext:
+  runAsNonRoot: true
+  runAsUser: 65532
+  runAsGroup: 65532
+  readOnlyRootFilesystem: true
+  allowPrivilegeEscalation: false
+  privileged: false
+  capabilities:
+    drop:
+      - ALL
+  seccompProfile:
+    type: RuntimeDefault
+
+# About 20 MB at rest. The server sizes its live streams from the memory limit (2048 under 256 MiB).
+resources:
+  requests:
+    cpu: 100m
+    memory: 128Mi
+  limits:
+    memory: 512Mi
+
+# On the real health endpoints: /healthz (the process answers) and /readyz (the database answers).
+probes:
+  startup:
+    periodSeconds: 2
+    failureThreshold: 60
+    timeoutSeconds: 5
+  liveness:
+    periodSeconds: 30
+    failureThreshold: 3
+    timeoutSeconds: 5
+  readiness:
+    periodSeconds: 10
+    failureThreshold: 3
+    timeoutSeconds: 5
+
+terminationGracePeriodSeconds: 30
+
+podDisruptionBudget:
+  enabled: true
+  # One of the two. With one replica, maxUnavailable 1 lets a node drain go ahead.
+  maxUnavailable: 1
+  minAvailable: ""
+
+networkPolicy:
+  enabled: true
+  # Who may reach the app on its port, as NetworkPolicy peers (your ingress controller's namespace).
+  # Empty: any pod or address.
+  ingressFrom: []
+  #  - namespaceSelector:
+  #      matchLabels:
+  #        kubernetes.io/metadata.name: ingress-nginx
+  egress:
+    # The OIDC provider, Google, and (if allowed) bots' model servers: https anywhere.
+    https: true
+    # Any other egress rules for the app, as NetworkPolicy egress entries.
+    extra: []
+
+# ClamAV, the malware scanner every upload is shown before it is kept (DIGIN_SCAN=clamd://...).
+# Off by default: it wants 1 to 3 GiB of memory. The fisma-moderate profile requires a scanner.
+# It starts as root and steps down to the clamav user, so its namespace must allow the baseline Pod
+# Security level, not restricted.
+clamav:
+  enabled: false
+  image:
+    repository: clamav/clamav
+    tag: stable@sha256:ebec5bc138401b36ae987caa1a3fa3c3b2a21ed3d51f0bfa5852825e663e67b0
+    pullPolicy: IfNotPresent
+  # A signature mirror inside your boundary, as host:port (FRESHCLAM_CONF_PrivateMirror). Empty: ClamAV's
+  # own servers, over https.
+  privateMirror: ""
+  # How long clamd may take to load its signatures before the container is restarted.
+  startupTimeoutSeconds: 300
+  # The signatures' volume. Off: an emptyDir, fetched again at each start.
+  persistence:
+    enabled: false
+    size: 2Gi
+    storageClass: ""
+  resources:
+    requests:
+      cpu: 100m
+      memory: 1536Mi
+    limits:
+      memory: 3Gi
+  nodeSelector: {}
+  tolerations: []
+  affinity: {}
+
+# A nightly pg_dump of the bundled PostgreSQL into a volume of its own, pruned after retainDays.
+# The uploaded files are not in it: see README, Back up.
+backup:
+  enabled: false
+  schedule: "15 3 * * *"
+  retainDays: 14
+  persistence:
+    size: 20Gi
+    storageClass: ""
+    existingClaim: ""
+  resources:
+    requests:
+      cpu: 50m
+      memory: 64Mi
+    limits:
+      memory: 512Mi
+
+extraVolumes: []
+extraVolumeMounts: []

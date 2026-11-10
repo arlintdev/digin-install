@@ -1,0 +1,92 @@
+Digin Evaluation License
+Copyright (c) 2026 Austin Arlint, trading as arlint.dev. All rights reserved.
+
+Digin is proprietary software. It is not open source, and nothing in this
+repository is offered under an open source license. This file says what you
+may do with Digin without a signed agreement. Where arlint.dev has signed a
+license agreement with you, that agreement governs instead.
+
+"Digin" means the Digin software, including the container images published
+at ghcr.io/arlintdev/digin and the server and web application in them.
+"Install files" means the Helm chart, the Docker Compose files and the other
+files in this repository.
+
+1. EVALUATION
+
+   Anyone may install and run Digin to evaluate it, for 90 days from the day
+   the installation first starts. During those 90 days you may:
+
+   a. pull the images from ghcr.io/arlintdev/digin and run them on systems
+      you control, or that are controlled for you;
+   b. let the people evaluating Digin with you use it;
+   c. keep copies of the images inside your own environment, such as a
+      private registry, only as needed to run the evaluation.
+
+   An evaluation is not production. You may not use Digin during an
+   evaluation to run your business or mission, to hold records you rely on,
+   or to serve people who are not evaluating it.
+
+2. AFTER 90 DAYS
+
+   After 90 days, continuing to run Digin requires a written license from
+   arlint.dev and the license key it issues. Without one, Digin becomes
+   read-only: people can sign in, read and export what is there, and nothing
+   can be created or changed. Starting a new installation to begin another
+   evaluation period is not permitted without written permission.
+
+   To buy a license: sales@digin.work.
+
+3. WHAT IS NOT GRANTED
+
+   Unless arlint.dev agrees in writing, you may not:
+
+   a. redistribute, publish, sell, rent or sublicense the images or any part
+      of Digin, or make them available to anyone outside your organization;
+   b. offer Digin, or anything built from it, to others as a hosted service;
+   c. copy, modify, decompile, disassemble or reverse engineer Digin, or
+      remove, disable or work around its license check, except where the
+      law allows this despite this restriction;
+   d. use Digin to build a competing product.
+
+   You get no right to Digin's source code. All rights not expressly granted
+   here are reserved by arlint.dev.
+
+4. THE INSTALL FILES
+
+   You may copy, modify and use the install files for the purpose of
+   installing and running Digin under this license or a signed agreement,
+   and share them, modified or not, with others who will run Digin under the
+   same terms. They grant no rights to Digin itself.
+
+5. THIRD-PARTY SOFTWARE
+
+   The images include third-party software under its own licenses, listed in
+   the bills of materials in the image at /usr/share/digin/sbom/. The install
+   files can also run software that is not Digin, such as PostgreSQL and
+   ClamAV, under its own licenses. Those licenses govern that software, and
+   nothing here narrows them.
+
+6. ENDING
+
+   This license ends at once if you break its terms. When it ends, or when
+   the evaluation period is over without a written license, stop running
+   Digin and delete the images, except for what you need to export your own
+   data.
+
+7. NO WARRANTY
+
+   Digin and the install files are provided "as is", without warranty of
+   any kind, express or implied, including the warranties of
+   merchantability, fitness for a particular purpose and non-infringement.
+   In no event shall arlint.dev or Austin Arlint be liable for any claim,
+   damages or other liability, whether in an action of contract, tort or
+   otherwise, arising from, out of or in connection with Digin, the install
+   files or their use.
+
+8. GOVERNING LAW
+
+   The law of the State of Montana, United States, without regard to its
+   conflict of law rules.
+
+Licensing, including for government and contractor use: sales@digin.work
+Reporting a security problem: security@arlint.dev

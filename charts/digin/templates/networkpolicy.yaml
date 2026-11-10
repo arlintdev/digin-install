@@ -1,0 +1,159 @@
+{{- if .Values.networkPolicy.enabled }}
+{{- $dns := list (dict "protocol" "UDP" "port" 53) (dict "protocol" "TCP" "port" 53) }}
+# The app: reached on its port by whoever ingressFrom names, and reaching only DNS, its database, the
+# scanner and (for sign-in) https.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "digin.fullname" . }}
+  labels:
+    {{- include "digin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "digin.selectorLabels" (dict "ctx" . "component" "server") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - ports:
+        - protocol: TCP
+          port: http
+      {{- with .Values.networkPolicy.ingressFrom }}
+      from:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+  egress:
+    - ports:
+        {{- toYaml $dns | nindent 8 }}
+    {{- if .Values.postgresql.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "digin.selectorLabels" (dict "ctx" . "component" "postgresql") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+    {{- else }}
+    - ports:
+        - protocol: TCP
+          port: {{ .Values.externalDatabase.port }}
+    {{- end }}
+    {{- if .Values.clamav.enabled }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "digin.selectorLabels" (dict "ctx" . "component" "clamav") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 3310
+    {{- end }}
+    {{- if .Values.networkPolicy.egress.https }}
+    - ports:
+        - protocol: TCP
+          port: 443
+    {{- end }}
+    {{- with .Values.networkPolicy.egress.extra }}
+    {{- toYaml . | nindent 4 }}
+    {{- end }}
+{{- if .Values.postgresql.enabled }}
+---
+# The database: reached by the app (and its migrate step) and the backup job alone, and reaching nothing.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "digin.postgresqlName" . }}
+  labels:
+    {{- include "digin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: postgresql
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "digin.selectorLabels" (dict "ctx" . "component" "postgresql") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "digin.selectorLabels" (dict "ctx" . "component" "server") | nindent 14 }}
+        - podSelector:
+            matchLabels:
+              {{- include "digin.selectorLabels" (dict "ctx" . "component" "backup") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+  egress: []
+{{- end }}
+{{- if .Values.backup.enabled }}
+---
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "digin.fullname" . }}-backup
+  labels:
+    {{- include "digin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: backup
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "digin.selectorLabels" (dict "ctx" . "component" "backup") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress: []
+  egress:
+    - ports:
+        {{- toYaml $dns | nindent 8 }}
+    - to:
+        - podSelector:
+            matchLabels:
+              {{- include "digin.selectorLabels" (dict "ctx" . "component" "postgresql") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 5432
+{{- end }}
+{{- if .Values.clamav.enabled }}
+---
+# The scanner: reached by the app alone, and reaching DNS and its signature servers.
+apiVersion: networking.k8s.io/v1
+kind: NetworkPolicy
+metadata:
+  name: {{ include "digin.clamavName" . }}
+  labels:
+    {{- include "digin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: clamav
+spec:
+  podSelector:
+    matchLabels:
+      {{- include "digin.selectorLabels" (dict "ctx" . "component" "clamav") | nindent 6 }}
+  policyTypes:
+    - Ingress
+    - Egress
+  ingress:
+    - from:
+        - podSelector:
+            matchLabels:
+              {{- include "digin.selectorLabels" (dict "ctx" . "component" "server") | nindent 14 }}
+      ports:
+        - protocol: TCP
+          port: 3310
+  egress:
+    - ports:
+        {{- toYaml $dns | nindent 8 }}
+    - ports:
+        - protocol: TCP
+          port: 443
+        - protocol: TCP
+          port: 80
+        {{- with .Values.clamav.privateMirror }}
+        {{- $parts := splitList ":" . }}
+        {{- if eq (len $parts) 2 }}
+        - protocol: TCP
+          port: {{ last $parts | int }}
+        {{- end }}
+        {{- end }}
+{{- end }}
+{{- end }}

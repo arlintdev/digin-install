@@ -1,0 +1,289 @@
+{{- $fullname := include "digin.fullname" . }}
+{{- $secret := include "digin.secretName" . }}
+{{- $separate := eq .Values.database.logins "separate" }}
+{{- $tail := include "digin.databaseTail" . }}
+{{- $rwx := or (has "ReadWriteMany" .Values.persistence.accessModes) (and .Values.persistence.existingClaim (gt (int .Values.replicaCount) 1)) }}
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: {{ $fullname }}
+  labels:
+    {{- include "digin.labels" . | nindent 4 }}
+    app.kubernetes.io/component: server
+spec:
+  replicas: {{ .Values.replicaCount }}
+  revisionHistoryLimit: 5
+  strategy:
+    {{- if and (gt (int .Values.replicaCount) 1) $rwx }}
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+    {{- else }}
+    # One pod at a time: the data volume is ReadWriteOnce, and the migrate step runs before the new release starts.
+    type: Recreate
+    {{- end }}
+  selector:
+    matchLabels:
+      {{- include "digin.selectorLabels" (dict "ctx" . "component" "server") | nindent 6 }}
+  template:
+    metadata:
+      labels:
+        {{- include "digin.labels" . | nindent 8 }}
+        app.kubernetes.io/component: server
+        {{- with .Values.podLabels }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      annotations:
+        checksum/config: {{ include (print $.Template.BasePath "/configmap.yaml") . | sha256sum }}
+        kubectl.kubernetes.io/default-container: digin
+        {{- with .Values.podAnnotations }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+    spec:
+      serviceAccountName: {{ include "digin.serviceAccountName" . }}
+      automountServiceAccountToken: false
+      # Service links would put variables named DIGIN_..._PORT into the environment, where Digin reads its settings.
+      enableServiceLinks: false
+      {{- with .Values.imagePullSecrets }}
+      imagePullSecrets:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.priorityClassName }}
+      priorityClassName: {{ . }}
+      {{- end }}
+      securityContext:
+        {{- toYaml .Values.podSecurityContext | nindent 8 }}
+      terminationGracePeriodSeconds: {{ .Values.terminationGracePeriodSeconds }}
+      initContainers:
+        # `digin migrate`, signed in as the database's owner: brings the schema to this release and makes or keeps
+        # the app's logins, setting their passwords from their files. The app container never holds the owner's password.
+        - name: migrate
+          image: {{ include "digin.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["migrate"]
+          env:
+            - name: DIGIN_DATABASE_URL
+              value: {{ printf "postgres://%s@%s" .Values.database.ownerUser $tail | quote }}
+            - name: DIGIN_DATABASE_PASSWORD_FILE
+              value: /run/secrets/db-owner-password
+            {{- if $separate }}
+            - name: DIGIN_DB_SERVER_USER
+              value: {{ .Values.database.serverUser | quote }}
+            - name: DIGIN_DB_SERVER_PASSWORD_FILE
+              value: /run/secrets/db-server-password
+            - name: DIGIN_DB_SYSTEM_USER
+              value: {{ .Values.database.systemUser | quote }}
+            - name: DIGIN_DB_SYSTEM_PASSWORD_FILE
+              value: /run/secrets/db-system-password
+            {{- end }}
+            {{- if .Values.database.requireTLS }}
+            - name: DIGIN_DATABASE_REQUIRE_TLS
+              value: "1"
+            {{- end }}
+            {{- if .Values.image.fips }}
+            - name: DIGIN_FIPS
+              value: require
+            {{- end }}
+            - name: TZ
+              value: UTC
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.migrate.resources | nindent 12 }}
+          volumeMounts:
+            - name: migrate-secrets
+              mountPath: /run/secrets
+              readOnly: true
+            {{- if and (not .Values.postgresql.enabled) .Values.externalDatabase.caSecret.name }}
+            - name: db-ca
+              mountPath: /run/tls/db
+              readOnly: true
+            {{- end }}
+      containers:
+        - name: digin
+          image: {{ include "digin.image" . }}
+          imagePullPolicy: {{ .Values.image.pullPolicy }}
+          args: ["serve"]
+          ports:
+            - name: http
+              containerPort: 3000
+              protocol: TCP
+          envFrom:
+            - configMapRef:
+                name: {{ $fullname }}
+          env:
+            - name: DIGIN_DATABASE_URL
+              value: {{ printf "postgres://%s@%s" (include "digin.serverUser" .) $tail | quote }}
+            {{- if $separate }}
+            - name: DIGIN_DATABASE_PASSWORD_FILE
+              value: /run/secrets/db-server-password
+            - name: DIGIN_DATABASE_SYSTEM_USER
+              value: {{ .Values.database.systemUser | quote }}
+            - name: DIGIN_DATABASE_SYSTEM_PASSWORD_FILE
+              value: /run/secrets/db-system-password
+            {{- else }}
+            - name: DIGIN_DATABASE_PASSWORD_FILE
+              value: /run/secrets/db-owner-password
+            {{- end }}
+            - name: DIGIN_FILES_KEY_FILE
+              value: /run/secrets/files-key
+            {{- if or .Values.signIn.oidc.issuer .Values.signIn.oidc.cloudflareTeamDomain }}
+            - name: OIDC_CLIENT_SECRET_FILE
+              value: /run/secrets/oidc-client-secret
+            {{- end }}
+            {{- if .Values.signIn.google.clientId }}
+            - name: GOOGLE_CLIENT_SECRET_FILE
+              value: /run/secrets/google-client-secret
+            {{- end }}
+            {{- range .Values.secretFiles }}
+            - name: {{ .env }}
+              value: /run/secrets/{{ .key }}
+            {{- end }}
+          securityContext:
+            {{- toYaml .Values.securityContext | nindent 12 }}
+          resources:
+            {{- toYaml .Values.resources | nindent 12 }}
+          {{- $scheme := ternary "HTTPS" "HTTP" .Values.appTLS.enabled }}
+          startupProbe:
+            httpGet:
+              path: /readyz
+              port: http
+              scheme: {{ $scheme }}
+              # Digin answers only to its own names: kubelet's probe comes addressed to the pod's IP.
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            periodSeconds: {{ .Values.probes.startup.periodSeconds }}
+            failureThreshold: {{ .Values.probes.startup.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.startup.timeoutSeconds }}
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: http
+              scheme: {{ $scheme }}
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            periodSeconds: {{ .Values.probes.readiness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.readiness.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.readiness.timeoutSeconds }}
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: http
+              scheme: {{ $scheme }}
+              httpHeaders:
+                - name: Host
+                  value: localhost
+            periodSeconds: {{ .Values.probes.liveness.periodSeconds }}
+            failureThreshold: {{ .Values.probes.liveness.failureThreshold }}
+            timeoutSeconds: {{ .Values.probes.liveness.timeoutSeconds }}
+          volumeMounts:
+            - name: data
+              mountPath: /app/data
+            - name: tmp
+              mountPath: /tmp
+            - name: app-secrets
+              mountPath: /run/secrets
+              readOnly: true
+            {{- if and (not .Values.postgresql.enabled) .Values.externalDatabase.caSecret.name }}
+            - name: db-ca
+              mountPath: /run/tls/db
+              readOnly: true
+            {{- end }}
+            {{- if .Values.appTLS.enabled }}
+            - name: app-tls
+              mountPath: /run/tls/app
+              readOnly: true
+            {{- end }}
+            {{- with .Values.extraVolumeMounts }}
+            {{- toYaml . | nindent 12 }}
+            {{- end }}
+      volumes:
+        - name: data
+          {{- if .Values.persistence.enabled }}
+          persistentVolumeClaim:
+            claimName: {{ default (printf "%s-data" $fullname) .Values.persistence.existingClaim }}
+          {{- else }}
+          emptyDir: {}
+          {{- end }}
+        - name: tmp
+          emptyDir:
+            sizeLimit: 256Mi
+        # 0440 and the pod's fsGroup (65532): readable by the server and no one else, as Digin's secret file rule asks.
+        - name: app-secrets
+          secret:
+            secretName: {{ $secret }}
+            defaultMode: 0440
+            items:
+              {{- if $separate }}
+              - key: db-server-password
+                path: db-server-password
+              - key: db-system-password
+                path: db-system-password
+              {{- else }}
+              - key: db-owner-password
+                path: db-owner-password
+              {{- end }}
+              - key: files-key
+                path: files-key
+              {{- if or .Values.signIn.oidc.issuer .Values.signIn.oidc.cloudflareTeamDomain }}
+              - key: oidc-client-secret
+                path: oidc-client-secret
+              {{- end }}
+              {{- if .Values.signIn.google.clientId }}
+              - key: google-client-secret
+                path: google-client-secret
+              {{- end }}
+              {{- range .Values.secretFiles }}
+              - key: {{ .key }}
+                path: {{ .key }}
+              {{- end }}
+        - name: migrate-secrets
+          secret:
+            secretName: {{ $secret }}
+            defaultMode: 0440
+            items:
+              - key: db-owner-password
+                path: db-owner-password
+              {{- if $separate }}
+              - key: db-server-password
+                path: db-server-password
+              - key: db-system-password
+                path: db-system-password
+              {{- end }}
+        {{- if and (not .Values.postgresql.enabled) .Values.externalDatabase.caSecret.name }}
+        - name: db-ca
+          secret:
+            secretName: {{ .Values.externalDatabase.caSecret.name }}
+            defaultMode: 0444
+            items:
+              - key: {{ .Values.externalDatabase.caSecret.key }}
+                path: ca.pem
+        {{- end }}
+        {{- if .Values.appTLS.enabled }}
+        - name: app-tls
+          secret:
+            secretName: {{ .Values.appTLS.secretName }}
+            defaultMode: 0440
+        {{- end }}
+        {{- with .Values.extraVolumes }}
+        {{- toYaml . | nindent 8 }}
+        {{- end }}
+      {{- with .Values.nodeSelector }}
+      nodeSelector:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.affinity }}
+      affinity:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.tolerations }}
+      tolerations:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}
+      {{- with .Values.topologySpreadConstraints }}
+      topologySpreadConstraints:
+        {{- toYaml . | nindent 8 }}
+      {{- end }}

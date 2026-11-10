@@ -1,0 +1,178 @@
+#!/bin/sh
+# ClamAV's start-up for Digin (from digin's deploy/clamav), in place of the ClamAV image's own /init:
+#
+#   entrypoint: ["/sbin/tini", "--", "/bin/sh", "/usr/local/bin/digin-clamav-start"]
+#
+# The image's start-up starts clamd in the background and then only counts, for CLAMD_STARTUP_TIMEOUT
+# seconds, waiting for clamd's socket. It never looks at clamd itself, so a start clamd refuses, as on a
+# volume whose .sign files freshclam is still fetching, is a container that waits out the whole count with
+# no scanner before Docker may start it again; and once clamd has answered, the image waits for ever on
+# tail, so a clamd that dies later leaves a container that is running, unhealthy, and never started again.
+#
+# This keeps everything of the image's start-up but clamd and freshclam. It runs /init with CLAMAV_NO_CLAMD
+# and CLAMAV_NO_FRESHCLAMD set, which writes the CLAMD_CONF_ and FRESHCLAM_CONF_ lines into the
+# configuration and fetches the databases if the volume has none, then waits for ever as tail; once it has
+# become tail, that is all done, and freshclam and clamd are started here, as this script's own children,
+# so that the moment either stops is known.
+#
+# freshclam is started as the image starts it, unless CLAMAV_NO_FRESHCLAMD is true, and kept: one that
+# stops, as one killed for memory might, is started again in the same container, FRESH_PAUSE seconds
+# later, so that clamd, which is answering, is left alone. The image left it gone, and the signatures
+# then went stale with nothing said until the baseline found them old hours later. Each time it stops
+# again within FRESH_SETTLED seconds of its start the pause is doubled, up to FRESH_PAUSE_MAX, so that a
+# freshclam that cannot start at all, on a configuration it refuses, asks the mirror four times an hour
+# and not once every few seconds; one that has run longer than that starts the pauses over.
+#
+# A clamd that stops before it has answered is started again after PAUSE seconds, in the same container,
+# for as long as CLAMD_STARTUP_TIMEOUT allows from its first start; freshclam keeps running beside it all
+# the while, so a .sign file it is still fetching arrives, and the next start takes it. Stopping the
+# container instead would stop freshclam too, perhaps part way through the very file clamd wanted. When
+# the time is up, clamd is stopped if it is still loading, and the container stops with "Failed to start
+# clamd", as the image's would, for its restart policy to start it again: the time has only to cover the
+# slowest load of the signatures, not a refusal. A clamd that stops after it has answered stops the
+# container at once, and Docker starts it again (README, Runbook: How long the scanner waits for clamd).
+#
+# docker stop is passed on to clamd, which is waited for, and to freshclam, and the container then stops
+# cleanly.
+set -eu
+
+TIMEOUT=${CLAMD_STARTUP_TIMEOUT:-1800}
+case "$TIMEOUT" in
+'' | *[!0-9]*)
+	echo "digin-clamav-start: CLAMD_STARTUP_TIMEOUT is not a number of seconds: $TIMEOUT" >&2
+	exit 1
+	;;
+esac
+PAUSE=5
+ANSWERED=/tmp/digin-clamd-answered
+FRESH_PAUSE=10
+FRESH_PAUSE_MAX=900
+FRESH_SETTLED=600
+FRESHCLAM=/tmp/digin-freshclam.pid
+
+clamd=
+kept=
+stopping=
+stop() {
+	stopping=1
+	# The keeper first, so that it does not start again the freshclam told to stop.
+	if [ -n "$kept" ]; then
+		kill -TERM "$kept" 2>/dev/null || true
+		wait "$kept" 2>/dev/null || true
+		kill -TERM "$(cat "$FRESHCLAM" 2>/dev/null)" 2>/dev/null || true
+	fi
+	if [ -n "$clamd" ]; then
+		kill -TERM "$clamd" 2>/dev/null || true
+	else
+		exit 0
+	fi
+}
+trap stop TERM INT
+
+# state is the one-letter state of a process (R, S, Z for one that has exited and not been waited for),
+# and name its name, from /proc; both are empty for a process that is gone.
+state() { sed -n 's/^.*) \([A-Za-z]\) .*$/\1/p' "/proc/$1/stat" 2>/dev/null || true; }
+name() { cat "/proc/$1/comm" 2>/dev/null || true; }
+
+CLAMAV_NO_CLAMD=true CLAMAV_NO_FRESHCLAMD=true /bin/sh /init &
+init=$!
+while [ "$(name "$init")" != tail ]; do
+	case "$(state "$init")" in
+	'' | Z)
+		status=0
+		wait "$init" || status=$?
+		echo "digin-clamav-start: the image's start-up stopped (exit $status) before it was done" >&2
+		exit 1
+		;;
+	esac
+	sleep 1
+done
+
+# keep_freshclam runs freshclam as the image's start-up runs it, and starts it again whenever it stops, after
+# a pause that grows while it keeps stopping soon after its start. Its process id is in $FRESHCLAM.
+keep_freshclam() {
+	# Run as a job of its own, it is ended by the TERM stop sends it, not handled as the script's is.
+	trap - TERM INT
+	pause=$FRESH_PAUSE
+	while :; do
+		began=$(date +%s)
+		echo "Starting Freshclamd"
+		freshclam --checks="${FRESHCLAM_CHECKS:-1}" --daemon --foreground --stdout --user=clamav &
+		echo $! >"$FRESHCLAM"
+		status=0
+		wait $! || status=$?
+		ran=$(($(date +%s) - began))
+		[ "$ran" -lt "$FRESH_SETTLED" ] || pause=$FRESH_PAUSE
+		echo "digin-clamav-start: freshclam stopped (exit $status) after $ran seconds; starting it again in $pause seconds"
+		sleep "$pause"
+		pause=$((pause * 2))
+		[ "$pause" -le "$FRESH_PAUSE_MAX" ] || pause=$FRESH_PAUSE_MAX
+	done
+}
+if [ "${CLAMAV_NO_FRESHCLAMD:-false}" != true ]; then
+	keep_freshclam &
+	kept=$!
+fi
+
+socket() { [ -S /run/clamav/clamd.sock ] || [ -S /tmp/clamd.sock ]; }
+
+# left is how many of the CLAMD_STARTUP_TIMEOUT seconds since clamd was first started are left.
+first=$(date +%s)
+left() { echo $((first + TIMEOUT - $(date +%s))); }
+give_up() {
+	echo "Failed to start clamd: it has not answered in $TIMEOUT seconds (CLAMD_STARTUP_TIMEOUT); stopping the container for Docker to start it again"
+	exit 1
+}
+
+while [ -z "$stopping" ]; do
+	left=$(left)
+	[ "$left" -gt 0 ] || give_up
+	rm -f /run/clamav/clamd.sock /tmp/clamd.sock "$ANSWERED"
+	echo "Starting ClamAV"
+	clamd --foreground &
+	clamd=$!
+
+	# The watch on the socket, beside clamd: it notes that clamd has answered, or stops a clamd still
+	# loading when the time is up.
+	(
+		waited=0
+		while ! socket; do
+			if [ "$waited" -ge "$left" ]; then
+				echo "digin-clamav-start: clamd has not answered in $TIMEOUT seconds; stopping it"
+				kill -TERM "$clamd" 2>/dev/null || true
+				exit 0
+			fi
+			sleep 1
+			waited=$((waited + 1))
+		done
+		: >"$ANSWERED"
+		echo "socket found, clamd started."
+	) &
+	watch=$!
+
+	status=0
+	wait "$clamd" || status=$?
+	if [ -n "$stopping" ]; then
+		# The signal ends the wait before clamd has stopped; wait for clamd itself.
+		wait "$clamd" 2>/dev/null || true
+		kill "$watch" 2>/dev/null || true
+		exit 0
+	fi
+	kill "$watch" 2>/dev/null || true
+	wait "$watch" 2>/dev/null || true
+
+	# The watch looks once a second, so a clamd killed just after it made its socket may stop before
+	# the watch has noted it; a socket still there, which clamd removes only when it stops cleanly, says
+	# the same.
+	if [ -e "$ANSWERED" ] || socket; then
+		echo "digin-clamav-start: clamd stopped (exit $status) after it had answered; stopping the container for Docker to start it again"
+		exit 1
+	fi
+	left=$(left)
+	[ "$left" -gt 0 ] || give_up
+	pause=$PAUSE
+	[ "$left" -ge "$pause" ] || pause=$left
+	echo "digin-clamav-start: clamd stopped (exit $status) before it answered; starting it again in $pause seconds"
+	sleep "$pause"
+done
+exit 0
