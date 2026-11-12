@@ -5,9 +5,9 @@ description: >-
   Proprietary: free to evaluate for 90 days, then a license key from arlint.dev is required.
 type: application
 # The chart's own version, moved with every change to the chart.
-version: 0.43.1
+version: 0.44.0
 # The Digin release the chart installs by default: the image tag is this, or this with -fips.
-appVersion: "v0.43.1"
+appVersion: "v0.44.0"
 kubeVersion: ">=1.27.0-0"
 home: https://about.digin.work
 sources:
