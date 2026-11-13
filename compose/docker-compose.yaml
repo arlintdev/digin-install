@@ -13,7 +13,7 @@ name: digin
 
 services:
   digin:
-    image: &digin-image ghcr.io/arlintdev/digin:${DIGIN_RELEASE:-v0.45.0}
+    image: &digin-image ghcr.io/arlintdev/digin:${DIGIN_RELEASE:-v0.46.0}
     container_name: digin
     restart: unless-stopped
     # The settings that are not secrets. No secret goes in .env. (Without one, DIGIN_PUBLIC_URL below stops `up`.)
